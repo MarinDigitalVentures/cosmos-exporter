@@ -2,9 +2,12 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"math"
 	"net/http"
+	"net/url"
 	"os"
 
 	sdk "github.com/cosmos/cosmos-sdk/types"
@@ -13,7 +16,6 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 	"github.com/spf13/viper"
-	tmrpc "github.com/tendermint/tendermint/rpc/client/http"
 	"google.golang.org/grpc"
 )
 
@@ -187,19 +189,62 @@ func Execute(cmd *cobra.Command, args []string) {
 	}
 }
 
-func setChainID() {
-	client, err := tmrpc.New(TendermintRPC, "/websocket")
+func getStatusWithEndpoint(ctx context.Context, u string) (string, error) {
+	// Parse the URL
+	parsedURL, err := url.Parse(u)
 	if err != nil {
-		log.Fatal().Err(err).Msg("Could not create Tendermint client")
+		return "", err
 	}
 
-	status, err := client.Status(context.Background())
+	// Check if the scheme is 'tcp' and modify to 'http'
+	if parsedURL.Scheme == "tcp" {
+		parsedURL.Scheme = "http"
+	}
+
+	queryPath := fmt.Sprintf("%s/status", parsedURL.String())
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, queryPath, nil)
+	if err != nil {
+		return "", err
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	b, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
+
+	type tendermintStatus struct {
+		JsonRPC string `json:"jsonrpc"`
+		ID      int    `json:"id"`
+		Result  struct {
+			NodeInfo struct {
+				Network string `json:"network"`
+			} `json:"node_info"`
+			SyncInfo struct {
+				CatchingUp bool `json:"catching_up"`
+			} `json:"sync_info"`
+		} `json:"result"`
+	}
+	var status tendermintStatus
+	if err := json.Unmarshal(b, &status); err != nil {
+		return "", err
+	}
+	return status.Result.NodeInfo.Network, nil
+}
+
+func setChainID() {
+	network, err := getStatusWithEndpoint(context.Background(), TendermintRPC)
 	if err != nil {
 		log.Fatal().Err(err).Msg("Could not query Tendermint status")
 	}
 
-	log.Info().Str("network", status.NodeInfo.Network).Msg("Got network status from Tendermint")
-	ChainID = status.NodeInfo.Network
+	log.Info().Str("network", network).Msg("Got network status from Tendermint")
+	ChainID = network
 	ConstLabels = map[string]string{
 		"chain_id": ChainID,
 	}
